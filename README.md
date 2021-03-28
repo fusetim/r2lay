@@ -5,13 +5,12 @@ A simple TCP relay made in Rust.
 
 ## Should support
 
-- [ ] Keep server socket open
-- [ ] Reconnect to server (if disconnected) on new client connection
-- [ ] IPv6 support
-- [ ] IPv4/IPv6 tunnel
-- [ ] TCP Proxy Protocol
-  * [ ] Version 1
-  * [ ] Version 2
+- [ ] CLI
+- [x] IPv6 support
+- [x] IPv4/IPv6 tunnel
+- [x] TCP Proxy Protocol
+  * [x] Version 1
+  * [x] Version 2
 
 ## License
 
