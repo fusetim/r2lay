@@ -1,36 +1,70 @@
 use anyhow::{bail, Context, Result};
+use structopt::StructOpt;
+use clap::arg_enum;
 use std::io::Cursor;
 use std::io::{Error, ErrorKind};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest};
 use tokio::net::{tcp::WriteHalf, TcpListener, TcpStream};
+use log::{info, error, debug, warn};
+
+arg_enum!{
+    #[derive(PartialEq, Debug, Clone)]
+    pub enum ProxyProtocol {
+        Disabled,
+        V1,
+        V2,
+    }
+}
+
+#[derive(Debug, StructOpt, Clone)]
+#[structopt(name="r2lay", about="A simple TCP relay made in Rust.")]
+struct Opt {
+    /// Enable Proxy Protocol 
+    /// 
+    /// Add Proxy Protocol header to each connection to the server.
+    #[structopt(short="P", long, possible_values = &ProxyProtocol::variants(), case_insensitive = true, default_value = "disabled")]
+    proxy_protocol: ProxyProtocol,
+
+    /// The listening TCP address with IP(v4/v6) and port
+    #[structopt(parse(try_from_str))]
+    proxy_addr: SocketAddr,
+
+    /// Back-end TCP address with IP(v4/v6) and port
+    #[structopt(parse(try_from_str))]
+    server_addr: SocketAddr,
+}
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("Hello, world!");
-    let listener = TcpListener::bind("[::1]:8080").await?;
+    let opt = Opt::from_args();
+    pretty_env_logger::init();
+    let listener = TcpListener::bind(&opt.proxy_addr).await?;
 
     loop {
         match listener.accept().await {
             Ok((socket, addr)) => {
+                let opt = opt.clone();
                 tokio::spawn(async move {
-                    println!("{:?} - new connection", addr);
-                    match handle(socket).await {
-                        Ok(()) => println!("{:?} - connection closed!", addr),
+                    info!("{:?} - new connection", addr);
+                    match handle(socket, opt).await {
+                        Ok(()) => info!("{:?} - connection closed!", addr),
                         Err(err) => {
                             if let Some(e) = err.downcast_ref::<Error>() {
                                 match e.kind() {
-                                    ErrorKind::BrokenPipe => println!("{:?} - broken pipe!", addr),
+                                    ErrorKind::BrokenPipe => warn!("{:?} - broken pipe!", addr),
                                     ErrorKind::ConnectionRefused => {
-                                        println!("{:?} - broken pipe!", addr)
+                                        warn!("{:?} - broken pipe!", addr)
                                     }
                                     ErrorKind::ConnectionAborted => {
-                                        println!("{:?} - connection abort!", addr)
+                                        warn!("{:?} - connection abort!", addr)
                                     }
                                     ErrorKind::ConnectionReset => {
-                                        println!("{:?} - connection reset!", addr)
+                                        warn!("{:?} - connection reset!", addr)
                                     }
-                                    _ => eprintln!("{:?} - unexpected error:\n{:?}", addr, e),
+                                    _ => error!("{:?} - unexpected error:\n{:?}", addr, e),
                                 }
                             }
                         }
@@ -44,10 +78,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle(mut client: TcpStream) -> Result<()> {
-    let mut server = TcpStream::connect("127.0.0.1:8080").await?;
+async fn handle(mut client: TcpStream, opt: Opt) -> Result<()> {
+    let mut server = TcpStream::connect(&opt.server_addr).await?;
     let (mut s_rx, mut s_tx) = server.split();
-    proxyv2_header(&client, &mut s_tx).await?;
+    match &opt.proxy_protocol {
+        ProxyProtocol::Disabled => {},
+        ProxyProtocol::V1 => proxyv1_header(&client, &mut s_tx).await?,
+        ProxyProtocol::V2 => proxyv2_header(&client, &mut s_tx).await?,
+    };
     let (mut c_rx, mut c_tx) = client.split();
     let mut buf_server = [0; 4096];
     let mut buf_client = [0; 4096];
@@ -57,7 +95,7 @@ async fn handle(mut client: TcpStream) -> Result<()> {
                 match bytes {
                     Ok(0) => break,
                     Ok(n) => {
-                        println!("SEND: {:?}", std::str::from_utf8(&buf_client[..n])?);
+                        debug!("SEND: {:?}", std::str::from_utf8(&buf_client[..n])?);
                         s_tx.write_all(&buf_client[..n]).await?;
                     }
                     _ => break,
@@ -68,7 +106,7 @@ async fn handle(mut client: TcpStream) -> Result<()> {
                     Ok(0) => break,
                     Ok(n) => {
                         if n > 0 {
-                            println!("RECV: {:?}", std::str::from_utf8(&buf_server[..n])?);
+                            debug!("RECV: {:?}", std::str::from_utf8(&buf_server[..n])?);
                             c_tx.write_all(&buf_server[..n]).await?;
                         }
                     }
